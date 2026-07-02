@@ -35,6 +35,7 @@ mkdir -p "$SCRATCH_RNASEQ/samplesheets"
 
 export APPTAINER_CACHEDIR="$SCRATCH_RNASEQ/.apptainer/build-cache"
 export APPTAINER_TMPDIR="$SCRATCH_RNASEQ/.apptainer/tmp"
+export PROOT_TMP_DIR="$SCRATCH_RNASEQ/.apptainer/tmp"
 export NXF_APPTAINER_CACHEDIR="$SCRATCH_RNASEQ/.nextflow-apptainer-cache"
 export NXF_OPTS='-Xms1g -Xmx4g'
 export PROOT_NO_SECCOMP=1
@@ -44,6 +45,23 @@ cat > "$SCRATCH_RNASEQ/samplesheets/sparvus_test_samplesheet.csv" <<EOF
 sample,fastq_1,fastq_2,strandedness
 C45-1B_S2_L002,/work/pi_lmangiamele_smith_edu/03_26_flut_yale_rnaseq/C45-1B_S2_L002_R1_001.fastq.gz,/work/pi_lmangiamele_smith_edu/03_26_flut_yale_rnaseq/C45-1B_S2_L002_R2_001.fastq.gz,auto
 C45-1H_S1_L002,/work/pi_lmangiamele_smith_edu/03_26_flut_yale_rnaseq/C45-1H_S1_L002_R1_001.fastq.gz,/work/pi_lmangiamele_smith_edu/03_26_flut_yale_rnaseq/C45-1H_S1_L002_R2_001.fastq.gz,auto
+EOF
+
+echo "Writing params file..."
+cat > "$SCRATCH_RNASEQ/tadpole_params.json" <<EOF
+{
+  "input": "$SCRATCH_RNASEQ/samplesheets/sparvus_test_samplesheet.csv",
+  "outdir": "$SCRATCH_RNASEQ/results_sparvus_test",
+  "fasta": "$GENOME_FASTA",
+  "gtf": "$GENOME_GTF",
+  "igenomes_ignore": true,
+  "aligner": "star_salmon",
+  "pseudo_aligner": "salmon",
+  "skip_bbsplit": true,
+  "skip_markduplicates": true,
+  "skip_rseqc": true,
+  "skip_dupradar": true
+}
 EOF
 
 echo "Cleaning partial Apptainer pulls..."
@@ -61,17 +79,7 @@ echo "Launching nf-core/rnaseq custom genome test..."
 nextflow run nf-core/rnaseq \
   -r 3.26.0 \
   -profile unity \
-  --input "$SCRATCH_RNASEQ/samplesheets/sparvus_test_samplesheet.csv" \
-  --outdir "$SCRATCH_RNASEQ/results_sparvus_test" \
-  --fasta "$GENOME_FASTA" \
-  --gtf "$GENOME_GTF" \
-  --igenomes_ignore true \
-  --aligner star_salmon \
-  --pseudo_aligner salmon \
-  --skip_bbsplit \
-  --skip_markduplicates \
-  --skip_rseqc \
-  --skip_dupradar \
+  -params-file "$SCRATCH_RNASEQ/tadpole_params.json" \
   -resume
 
 echo "Finished at: $(date)"
