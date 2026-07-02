@@ -12,6 +12,7 @@
 set -euo pipefail
 
 SCRATCH_RNASEQ=/scratch/workspace/kfloer_smith_edu-rnaseq_real_test
+SHARED_CONTAINER_CACHE=/work/pi_lmangiamele_smith_edu/nfcore_container_cache/rnaseq-3.26.0
 
 GENOME_FASTA=/scratch3/workspace/kfloer_smith_edu-simple/egapx_sparvus/output/complete.genomic.fna
 GENOME_GTF=/scratch3/workspace/kfloer_smith_edu-simple/egapx_sparvus/output/complete.genomic.gtf
@@ -19,6 +20,7 @@ GENOME_GTF=/scratch3/workspace/kfloer_smith_edu-simple/egapx_sparvus/output/comp
 echo "Running on host: $(hostname)"
 echo "Started at: $(date)"
 echo "Scratch workspace: $SCRATCH_RNASEQ"
+echo "Shared container cache: $SHARED_CONTAINER_CACHE"
 echo "Genome FASTA: $GENOME_FASTA"
 echo "Genome GTF: $GENOME_GTF"
 
@@ -30,14 +32,13 @@ module load apptainer/latest
 
 mkdir -p "$SCRATCH_RNASEQ/.apptainer/build-cache"
 mkdir -p "$SCRATCH_RNASEQ/.apptainer/tmp"
-mkdir -p "$SCRATCH_RNASEQ/.nextflow-apptainer-cache"
 mkdir -p "$SCRATCH_RNASEQ/samplesheets"
 
 export APPTAINER_CACHEDIR="$SCRATCH_RNASEQ/.apptainer/build-cache"
 export APPTAINER_TMPDIR="$SCRATCH_RNASEQ/.apptainer/tmp"
 export PROOT_TMP_DIR="$SCRATCH_RNASEQ/.apptainer/tmp"
 export TMPDIR="$SCRATCH_RNASEQ/.apptainer/tmp"
-export NXF_APPTAINER_CACHEDIR="$SCRATCH_RNASEQ/.nextflow-apptainer-cache"
+export NXF_APPTAINER_CACHEDIR="$SHARED_CONTAINER_CACHE"
 export NXF_OPTS='-Xms1g -Xmx4g'
 export PROOT_NO_SECCOMP=1
 
@@ -65,16 +66,35 @@ cat > "$SCRATCH_RNASEQ/tadpole_params.json" <<EOF
 }
 EOF
 
-echo "Cleaning partial Apptainer pulls..."
-find "$NXF_APPTAINER_CACHEDIR" -type f -name "*.pulling.*" -delete || true
-
-echo "Checking cached Apptainer images..."
-find "$NXF_APPTAINER_CACHEDIR" -type f -name "*.img" | while read -r img; do
-    if ! apptainer inspect "$img" > /dev/null 2>&1; then
-        echo "Removing invalid container image: $img"
-        rm -f "$img"
+echo "Checking required input files..."
+for f in \
+  "$GENOME_FASTA" \
+  "$GENOME_GTF" \
+  /work/pi_lmangiamele_smith_edu/03_26_flut_yale_rnaseq/C45-1B_S2_L002_R1_001.fastq.gz \
+  /work/pi_lmangiamele_smith_edu/03_26_flut_yale_rnaseq/C45-1B_S2_L002_R2_001.fastq.gz \
+  /work/pi_lmangiamele_smith_edu/03_26_flut_yale_rnaseq/C45-1H_S1_L002_R1_001.fastq.gz \
+  /work/pi_lmangiamele_smith_edu/03_26_flut_yale_rnaseq/C45-1H_S1_L002_R2_001.fastq.gz
+do
+    if [[ ! -s "$f" ]]; then
+        echo "ERROR: Missing or empty file: $f"
+        exit 1
     fi
 done
+
+echo "Checking shared Apptainer images..."
+find "$NXF_APPTAINER_CACHEDIR" -type f -name "*.img" | while read -r img; do
+    if ! apptainer inspect "$img" > /dev/null 2>&1; then
+        echo "ERROR: Invalid shared container image: $img"
+        echo "Ask the cache owner to rebuild the shared cache."
+        exit 1
+    fi
+done
+
+echo "Nextflow version:"
+nextflow -version
+
+echo "Apptainer version:"
+apptainer --version
 
 echo "Launching nf-core/rnaseq custom genome test..."
 nextflow run nf-core/rnaseq \
