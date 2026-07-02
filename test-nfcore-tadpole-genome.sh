@@ -36,6 +36,7 @@ mkdir -p "$SCRATCH_RNASEQ/samplesheets"
 export APPTAINER_CACHEDIR="$SCRATCH_RNASEQ/.apptainer/build-cache"
 export APPTAINER_TMPDIR="$SCRATCH_RNASEQ/.apptainer/tmp"
 export PROOT_TMP_DIR="$SCRATCH_RNASEQ/.apptainer/tmp"
+export TMPDIR="$SCRATCH_RNASEQ/.apptainer/tmp"
 export NXF_APPTAINER_CACHEDIR="$SCRATCH_RNASEQ/.nextflow-apptainer-cache"
 export NXF_OPTS='-Xms1g -Xmx4g'
 export PROOT_NO_SECCOMP=1
