@@ -2,7 +2,7 @@
 #SBATCH --job-name=nfcore-rnaseq-test
 #SBATCH --partition=cpu
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --mem=48G
 #SBATCH --time=24:00:00
 #SBATCH --output=/home/kfloer_smith_edu/rnaseq_nf_core/job-logs/nfcore-rnaseq-test.%j.out
 #SBATCH --error=/home/kfloer_smith_edu/rnaseq_nf_core/job-logs/nfcore-rnaseq-test.%j.err
