@@ -59,6 +59,8 @@ cat > "$SCRATCH_RNASEQ/tadpole_params.json" <<EOF
   "igenomes_ignore": true,
   "aligner": "star_salmon",
   "pseudo_aligner": "salmon",
+  "gtf_extra_attributes": "gene",
+  "featurecounts_group_type": "gene_id",
   "skip_bbsplit": true,
   "skip_markduplicates": true,
   "skip_rseqc": true,
