@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-SCRATCH_RNASEQ=/scratch/workspace/kfloer_smith_edu-rnaseq_tadpole_adult_all
+SCRATCH_RNASEQ=/scratch4/workspace/kfloer_smith_edu-rnaseq_tadpole_adult_all
 SHARED_CONTAINER_CACHE=/work/pi_lmangiamele_smith_edu/nfcore_container_cache/rnaseq-3.26.0
 
 FASTQ_DIR=/work/pi_lmangiamele_smith_edu/03_26_flut_yale_rnaseq
