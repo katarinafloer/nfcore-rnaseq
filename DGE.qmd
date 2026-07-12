@@ -724,9 +724,15 @@ ar_blockade_head <- run_comparison(
 
 dds_old <- dds[, dds$stage == "Old"]
 
-dds_old$tadpole <- droplevels(dds_old$tadpole)
-dds_old$tissue <- droplevels(dds_old$tissue)
-dds_old$treatment <- droplevels(dds_old$treatment)
+dds_old$tadpole <- factor(dds_old$tadpole)
+dds_old$tissue <- factor(
+  dds_old$tissue,
+  levels = c("Body", "Head")
+)
+dds_old$treatment <- factor(
+  dds_old$treatment,
+  levels = c("Control", "Flutamide")
+)
 
 # Numeric indicator for the flutamide-by-head interaction.
 dds_old$flutamide_head <- as.integer(
@@ -976,8 +982,14 @@ ggsave(
 # tadpole-adjusted interaction above remains the primary analysis.
 
 dds_old_unpaired <- dds[, dds$stage == "Old"]
-dds_old_unpaired$treatment <- droplevels(dds_old_unpaired$treatment)
-dds_old_unpaired$tissue <- droplevels(dds_old_unpaired$tissue)
+dds_old_unpaired$treatment <- factor(
+  dds_old_unpaired$treatment,
+  levels = c("Control", "Flutamide")
+)
+dds_old_unpaired$tissue <- factor(
+  dds_old_unpaired$tissue,
+  levels = c("Body", "Head")
+)
 
 design(dds_old_unpaired) <- ~ treatment * tissue
 
