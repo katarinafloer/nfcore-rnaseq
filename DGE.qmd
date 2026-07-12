@@ -1265,6 +1265,104 @@ ggsave(
   dpi = 300
 )
 
+# ----------------------------
+# 12. Identify paired-significant interaction genes
+# ----------------------------
+
+paired_significant_genes <- subset(
+  interaction_out,
+  !is.na(padj) & padj < 0.05
+)
+
+paired_significant_genes <- paired_significant_genes[, c(
+  "gene_id",
+  "gene_name",
+  "product_description",
+  "head_flutamide_log2FC",
+  "head_flutamide_padj",
+  "body_flutamide_log2FC",
+  "body_flutamide_padj",
+  "shrunken_interaction_log2FC",
+  "padj",
+  "interaction_result"
+)]
+
+paired_significant_genes <- paired_significant_genes[
+  order(paired_significant_genes$padj),
+]
+
+print(paired_significant_genes, row.names = FALSE)
+
+write.csv(
+  paired_significant_genes,
+  paste0(
+    "DESeq2_results/DGE/",
+    "AR_blockade_paired_significant_interaction_genes.csv"
+  ),
+  row.names = FALSE
+)
+
+# Genes significant in both paired and unpaired interaction models.
+robust_interaction_genes <- subset(
+  sensitivity_comparison,
+  paired_significant & unpaired_significant
+)
+
+robust_interaction_genes <- robust_interaction_genes[, c(
+  "gene_id",
+  "gene_name",
+  "product_description",
+  "paired_interaction_log2FC",
+  "paired_interaction_padj",
+  "unpaired_interaction_log2FC",
+  "unpaired_interaction_padj",
+  "direction_agrees"
+)]
+
+write.csv(
+  robust_interaction_genes,
+  paste0(
+    "DESeq2_results/DGE/",
+    "AR_blockade_interaction_significant_in_both_models.csv"
+  ),
+  row.names = FALSE
+)
+
+# Genes significant only in the primary paired model.
+paired_only_interaction_genes <- subset(
+  sensitivity_comparison,
+  paired_significant & !unpaired_significant
+)
+
+paired_only_interaction_genes <- paired_only_interaction_genes[, c(
+  "gene_id",
+  "gene_name",
+  "product_description",
+  "paired_interaction_log2FC",
+  "paired_interaction_padj",
+  "unpaired_interaction_log2FC",
+  "unpaired_interaction_padj",
+  "direction_agrees"
+)]
+
+write.csv(
+  paired_only_interaction_genes,
+  paste0(
+    "DESeq2_results/DGE/",
+    "AR_blockade_interaction_significant_in_paired_only.csv"
+  ),
+  row.names = FALSE
+)
+
+message(
+  nrow(paired_significant_genes),
+  " paired-significant interaction genes: ",
+  nrow(robust_interaction_genes),
+  " are also significant in the unpaired model and ",
+  nrow(paired_only_interaction_genes),
+  " are significant only in the paired model."
+)
+
 # Save the fitted object so analysis need not be rerun.
 saveRDS(dds, "DESeq2_results/dds_fitted.rds")
 saveRDS(vsd, "DESeq2_results/vsd.rds")
@@ -1276,3 +1374,24 @@ saveRDS(
 
 sessionInfo()
 ```
+
+## Interpreting the older-only AR-blockade interaction
+
+The primary paired analysis identified `r nrow(paired_significant_genes)` genes whose flutamide response differed significantly between head and body at an adjusted p-value threshold of 0.05. Of these, `r nrow(robust_interaction_genes)` were also significant in the unpaired sensitivity model, while `r nrow(paired_only_interaction_genes)` crossed the significance threshold only in the paired model.
+
+The interaction is defined as:
+
+$$
+(\text{Flutamide head}-\text{Control head})-
+(\text{Flutamide body}-\text{Control body}).
+$$
+
+A **positive interaction** means that the flutamide-associated change is more positive in head than in body. This could represent stronger induction in head, stronger repression in body, or both. A **negative interaction** means that the flutamide-associated change is more positive in body than in head; this could represent stronger induction in body, stronger repression in head, or both.
+
+The interaction sign alone should therefore not be described as gene upregulation or downregulation. Interpret each gene using `head_flutamide_log2FC` and `body_flutamide_log2FC` alongside `shrunken_interaction_log2FC`:
+
+- Head and body effects with the same sign but different magnitudes indicate a quantitatively tissue-biased response.
+- Effects with opposite signs indicate a qualitatively tissue-dependent response and are especially strong candidates for follow-up.
+- Genes significant in both paired and unpaired models have the strongest statistical robustness to the modeling choice.
+- Genes significant only in the paired model may still be biologically meaningful, particularly when the unpaired effect has the same direction, but should be interpreted more cautiously.
+- Statistical interaction does not establish direct androgen-receptor regulation. Changes may be indirect or may reflect altered developmental timing or tissue composition.
