@@ -704,9 +704,268 @@ ar_blockade_head <- run_comparison(
   comparison_name = "AR_blockade_OldHeadFlutamide_vs_OldHeadControl"
 )
 
+```
+
+
+```{r}
+# ----------------------------
+# 10. Older-only AR-blockade tissue interaction
+# ----------------------------
+
+# Formally test whether the flutamide effect differs between head and body:
+#
+# (Flutamide head - Control head) -
+# (Flutamide body - Control body)
+#
+# Head and body were collected from the same tadpoles when both libraries
+# were available. Including tadpole as a fixed effect accounts for this
+# pairing. Tadpole absorbs the between-animal treatment effect, while the
+# flutamide_head coefficient estimates the treatment-by-tissue interaction.
+
+dds_old <- dds[, dds$stage == "Old"]
+
+dds_old$tadpole <- droplevels(dds_old$tadpole)
+dds_old$tissue <- droplevels(dds_old$tissue)
+dds_old$treatment <- droplevels(dds_old$treatment)
+
+# Numeric indicator for the flutamide-by-head interaction.
+dds_old$flutamide_head <- as.integer(
+  dds_old$treatment == "Flutamide" &
+    dds_old$tissue == "Head"
+)
+
+design(dds_old) <- ~ tadpole + tissue + flutamide_head
+
+# Stop with an informative error if the paired model is not estimable.
+old_model_matrix <- model.matrix(
+  design(dds_old),
+  data = as.data.frame(colData(dds_old))
+)
+
+if (qr(old_model_matrix)$rank != ncol(old_model_matrix)) {
+  stop("The older-only paired interaction model is not full rank.")
+}
+
+message(
+  "Older-only interaction model: ",
+  ncol(dds_old),
+  " libraries from ",
+  nlevels(dds_old$tadpole),
+  " tadpoles; residual degrees of freedom = ",
+  nrow(old_model_matrix) - qr(old_model_matrix)$rank,
+  "."
+)
+
+# Re-estimate dispersions and coefficients for the older-only paired model.
+dds_old <- DESeq(dds_old)
+
+interaction_name <- grep(
+  "flutamide_head",
+  resultsNames(dds_old),
+  value = TRUE
+)
+
+stopifnot(length(interaction_name) == 1)
+
+res_interaction <- results(
+  dds_old,
+  name = interaction_name,
+  alpha = 0.05
+)
+
+# apeglm can shrink this interaction because it is represented by a single
+# model coefficient. Fall back to the unshrunken estimate if unavailable.
+if (requireNamespace("apeglm", quietly = TRUE)) {
+  res_interaction_shrunk <- lfcShrink(
+    dds_old,
+    coef = interaction_name,
+    type = "apeglm"
+  )
+  interaction_shrink_method <- "apeglm"
+} else {
+  warning(
+    "Package 'apeglm' is unavailable; the interaction CSV and plot will ",
+    "use unshrunken log2 fold changes. Install it with ",
+    "BiocManager::install('apeglm')."
+  )
+  res_interaction_shrunk <- res_interaction
+  interaction_shrink_method <- "none"
+}
+
+# Retain the two component contrasts to make the interaction interpretable.
+res_old_head <- results(
+  dds,
+  contrast = c(
+    "group",
+    "Old_Flutamide_Head",
+    "Old_Control_Head"
+  ),
+  alpha = 0.05
+)
+
+res_old_body <- results(
+  dds,
+  contrast = c(
+    "group",
+    "Old_Flutamide_Body",
+    "Old_Control_Body"
+  ),
+  alpha = 0.05
+)
+
+interaction_out <- as.data.frame(res_interaction)
+interaction_out$gene_id <- rownames(interaction_out)
+interaction_out$gene_name <- mcols(dds_old)[
+  interaction_out$gene_id,
+  "gene_name"
+]
+interaction_out$product_description <- mcols(dds_old)[
+  interaction_out$gene_id,
+  "product_description"
+]
+interaction_out$head_flutamide_log2FC <- res_old_head$log2FoldChange[
+  match(interaction_out$gene_id, rownames(res_old_head))
+]
+interaction_out$head_flutamide_padj <- res_old_head$padj[
+  match(interaction_out$gene_id, rownames(res_old_head))
+]
+interaction_out$body_flutamide_log2FC <- res_old_body$log2FoldChange[
+  match(interaction_out$gene_id, rownames(res_old_body))
+]
+interaction_out$body_flutamide_padj <- res_old_body$padj[
+  match(interaction_out$gene_id, rownames(res_old_body))
+]
+interaction_out$shrunken_interaction_log2FC <-
+  res_interaction_shrunk$log2FoldChange
+interaction_out$shrunken_interaction_lfcSE <-
+  res_interaction_shrunk$lfcSE
+
+interaction_out <- interaction_out[, c(
+  "gene_id",
+  "gene_name",
+  "product_description",
+  "baseMean",
+  "head_flutamide_log2FC",
+  "head_flutamide_padj",
+  "body_flutamide_log2FC",
+  "body_flutamide_padj",
+  "log2FoldChange",
+  "lfcSE",
+  "shrunken_interaction_log2FC",
+  "shrunken_interaction_lfcSE",
+  "stat",
+  "pvalue",
+  "padj"
+)]
+
+interaction_out <- interaction_out[
+  order(interaction_out$padj, interaction_out$pvalue, na.last = TRUE),
+]
+
+interaction_out$interaction_result <- "Not significant"
+interaction_out$interaction_result[
+  !is.na(interaction_out$padj) &
+    interaction_out$padj < 0.05 &
+    interaction_out$shrunken_interaction_log2FC > 0
+] <- "Positive head-minus-body interaction"
+interaction_out$interaction_result[
+  !is.na(interaction_out$padj) &
+    interaction_out$padj < 0.05 &
+    interaction_out$shrunken_interaction_log2FC < 0
+] <- "Negative head-minus-body interaction"
+
+write.csv(
+  interaction_out,
+  paste0(
+    "DESeq2_results/DGE/",
+    "AR_blockade_head_vs_body_interaction_old_only.csv"
+  ),
+  row.names = FALSE
+)
+
+summary(res_interaction)
+
+# Interaction volcano plot.
+interaction_plot_data <- interaction_out
+interaction_plot_data$plot_padj <- ifelse(
+  is.na(interaction_plot_data$padj),
+  1,
+  pmax(interaction_plot_data$padj, .Machine$double.xmin)
+)
+
+interaction_labels <- subset(
+  interaction_plot_data,
+  interaction_result != "Not significant" &
+    !is.na(gene_name) &
+    gene_name != ""
+)
+interaction_labels <- head(
+  interaction_labels[order(interaction_labels$padj), ],
+  10
+)
+
+interaction_volcano <- ggplot(
+  interaction_plot_data,
+  aes(
+    x = shrunken_interaction_log2FC,
+    y = -log10(plot_padj),
+    color = interaction_result
+  )
+) +
+  geom_point(alpha = 0.65, size = 1.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey40") +
+  geom_hline(
+    yintercept = -log10(0.05),
+    linetype = "dashed",
+    color = "grey40"
+  ) +
+  geom_text_repel(
+    data = interaction_labels,
+    aes(label = gene_name),
+    size = 3,
+    max.overlaps = Inf,
+    show.legend = FALSE
+  ) +
+  scale_color_manual(
+    values = c(
+      "Negative head-minus-body interaction" = "#2C7BB6",
+      "Not significant" = "grey75",
+      "Positive head-minus-body interaction" = "#D7191C"
+    )
+  ) +
+  labs(
+    title = "Older tadpoles: AR-blockade tissue interaction",
+    subtitle = paste0(
+      "(Flutamide head - control head) - ",
+      "(flutamide body - control body); shrinkage: ",
+      interaction_shrink_method
+    ),
+    x = "Head-minus-body interaction log2 fold change",
+    y = expression(-log[10]("interaction adjusted p-value")),
+    color = NULL
+  ) +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "top")
+
+ggsave(
+  "DESeq2_results/volcano/AR_blockade_head_vs_body_interaction_old_only.pdf",
+  interaction_volcano,
+  width = 9,
+  height = 7
+)
+
+ggsave(
+  "DESeq2_results/volcano/AR_blockade_head_vs_body_interaction_old_only.png",
+  interaction_volcano,
+  width = 9,
+  height = 7,
+  dpi = 300
+)
+
 # Save the fitted object so analysis need not be rerun.
 saveRDS(dds, "DESeq2_results/dds_fitted.rds")
 saveRDS(vsd, "DESeq2_results/vsd.rds")
+saveRDS(dds_old, "DESeq2_results/dds_old_interaction_fitted.rds")
 
 sessionInfo()
 ```
