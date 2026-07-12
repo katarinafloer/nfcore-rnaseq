@@ -1,0 +1,704 @@
+---
+title: "DGE"
+format: html
+editor: visual
+---
+
+```{r}
+# ============================================================
+# nf-core/rnaseq gene-level differential expression analysis
+# ============================================================
+
+# Install once if needed:
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#   install.packages("BiocManager")
+#
+# BiocManager::install(c("DESeq2", "pheatmap", "rtracklayer"))
+# install.packages(c("ggplot2", "ggrepel", "matrixStats"))
+#
+# Optional, but recommended for LFC shrinkage:
+# BiocManager::install("ashr")
+
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+library(matrixStats)
+```
+
+
+```{r}
+# ----------------------------
+# 1. Import count matrix
+# ----------------------------
+
+count_file <- "salmon.merged.gene_counts.tsv"
+
+dat <- read.delim(
+  count_file,
+  header = TRUE,
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+stopifnot(all(c("gene_id", "gene_name") %in% names(dat)))
+stopifnot(!anyDuplicated(dat$gene_id))
+
+gene_annotation <- dat[, c("gene_id", "gene_name")]
+
+# Add product descriptions from the EGAPx GTF. Product annotations are
+# transcript/isoform-level and are repeated on exon/CDS records, so prefer
+# transcript records and collapse distinct isoform products once per gene.
+gtf_file <- "complete.genomic.gtf"
+
+if (!requireNamespace("rtracklayer", quietly = TRUE)) {
+  stop(
+    "Package 'rtracklayer' is required. Install it with: ",
+    "BiocManager::install('rtracklayer')"
+  )
+}
+
+gtf <- rtracklayer::import(gtf_file)
+
+if (!all(c("gene_id", "type", "product") %in% names(mcols(gtf)))) {
+  stop("The GTF must contain gene_id, type, and product attributes.")
+}
+
+gtf_products <- data.frame(
+  gene_id = as.character(mcols(gtf)$gene_id),
+  feature_type = as.character(mcols(gtf)$type),
+  product = as.character(mcols(gtf)$product),
+  stringsAsFactors = FALSE
+)
+
+gtf_products <- gtf_products[
+  !is.na(gtf_products$gene_id) &
+    gtf_products$gene_id != "" &
+    !is.na(gtf_products$product) &
+    gtf_products$product != "",
+]
+
+product_annotation <- do.call(
+  rbind,
+  lapply(split(gtf_products, gtf_products$gene_id), function(x) {
+    transcript_products <- unique(
+      x$product[x$feature_type %in% c("transcript", "mRNA")]
+    )
+
+    products <- if (length(transcript_products) > 0) {
+      transcript_products
+    } else {
+      unique(x$product)
+    }
+
+    data.frame(
+      gene_id = x$gene_id[1],
+      product_description = paste(products, collapse = " | "),
+      stringsAsFactors = FALSE
+    )
+  })
+)
+
+rownames(product_annotation) <- NULL
+
+gene_annotation$product_description <- product_annotation$product_description[
+  match(gene_annotation$gene_id, product_annotation$gene_id)
+]
+
+message(
+  sum(!is.na(gene_annotation$product_description)),
+  " of ",
+  nrow(gene_annotation),
+  " count-table genes matched to a GTF product description."
+)
+
+rm(gtf, gtf_products, product_annotation)
+
+count_data <- as.matrix(
+  dat[, setdiff(names(dat), c("gene_id", "gene_name"))]
+)
+
+rownames(count_data) <- dat$gene_id
+storage.mode(count_data) <- "numeric"
+
+# DESeq2 requires nonnegative count-like input.
+stopifnot(!anyNA(count_data))
+stopifnot(all(count_data >= 0))
+
+# The supplied merged file appears integer-valued. This also handles
+# very small floating-point deviations if estimated counts are present.
+if (!all(count_data == round(count_data))) {
+  message("Non-integer estimated counts found; rounding for direct DESeq2 import.")
+  count_data <- round(count_data)
+}
+
+# Remove annotation table from the working environment if desired.
+rm(dat)
+```
+
+
+```{r}
+# ----------------------------
+# 2. Construct sample metadata
+# ----------------------------
+
+sample_id <- colnames(count_data)
+sample_core <- sub("_S[0-9]+_L[0-9]+$", "", sample_id)
+
+coldata <- data.frame(
+  sample_id = sample_id,
+  sample_core = sample_core,
+  stringsAsFactors = FALSE
+)
+
+rownames(coldata) <- coldata$sample_id
+
+coldata$day <- ifelse(
+  grepl("^[CF]45-", coldata$sample_core), 45L,
+  ifelse(grepl("^[CF]103-", coldata$sample_core), 103L, NA_integer_)
+)
+
+coldata$stage <- factor(
+  ifelse(coldata$day == 45, "Young", "Old"),
+  levels = c("Young", "Old")
+)
+
+coldata$treatment <- factor(
+  ifelse(grepl("^F", coldata$sample_core), "Flutamide", "Control"),
+  levels = c("Control", "Flutamide")
+)
+
+coldata$tissue <- factor(
+  ifelse(grepl("B$", coldata$sample_core), "Body",
+         ifelse(grepl("H$", coldata$sample_core), "Head", NA)),
+  levels = c("Body", "Head")
+)
+
+# Tadpole identifier, retained for plotting and QC.
+# Do not include it in the DGE model: tadpoles are nested within
+# stage/treatment, so subject and group would be confounded.
+coldata$tadpole <- sub("[BH]$", "", coldata$sample_core)
+
+stopifnot(!anyNA(coldata[, c("day", "stage", "treatment", "tissue")]))
+stopifnot(identical(rownames(coldata), colnames(count_data)))
+
+# Combined experimental group. Using one factor makes the requested
+# contrasts explicit and avoids unnecessary interaction complexity.
+coldata$group <- factor(
+  paste(coldata$stage, coldata$treatment, coldata$tissue, sep = "_"),
+  levels = c(
+    "Young_Control_Body",
+    "Young_Control_Head",
+    "Old_Control_Body",
+    "Old_Control_Head",
+    "Old_Flutamide_Body",
+    "Old_Flutamide_Head"
+  )
+)
+
+# Check replication and metadata assignment.
+print(coldata[, c(
+  "sample_core", "tadpole", "day",
+  "stage", "treatment", "tissue", "group"
+)])
+
+print(table(coldata$group))
+
+# Expected:
+# Young_Control_Body     5
+# Young_Control_Head     4
+# Old_Control_Body       4
+# Old_Control_Head       3
+# Old_Flutamide_Body     5
+# Old_Flutamide_Head     4
+```
+
+
+```{r}
+# ----------------------------
+# 3. Build and fit DESeq2 model
+# ----------------------------
+
+dds <- DESeqDataSetFromMatrix(
+  countData = count_data,
+  colData = coldata,
+  design = ~ group
+)
+
+# Attach gene names without using them as row identifiers.
+# Gene names may not be unique; gene_id is the safer row identifier.
+mcols(dds)$gene_name <- gene_annotation$gene_name[
+  match(rownames(dds), gene_annotation$gene_id)
+]
+
+mcols(dds)$product_description <- gene_annotation$product_description[
+  match(rownames(dds), gene_annotation$gene_id)
+]
+
+# Bulk RNA-seq prefilter recommended in the DESeq2 manual:
+# count >= 10 in at least the smallest group size (3 samples).
+keep <- rowSums(counts(dds) >= 10) >= 3
+message(sum(keep), " of ", length(keep), " genes retained.")
+dds <- dds[keep, ]
+
+dds <- DESeq(dds)
+
+resultsNames(dds)
+plotDispEsts(dds)
+
+# Create output directories.
+dir.create("DESeq2_results", showWarnings = FALSE)
+dir.create("DESeq2_results/QC", showWarnings = FALSE)
+dir.create("DESeq2_results/DGE", showWarnings = FALSE)
+dir.create("DESeq2_results/volcano", showWarnings = FALSE)
+
+write.csv(
+  as.data.frame(colData(dds)),
+  "DESeq2_results/sample_metadata.csv",
+  row.names = FALSE
+)
+```
+
+
+```{r}
+# ----------------------------
+# 4. VST for PCA and clustering
+# ----------------------------
+
+# blind=FALSE is appropriate for biological visualization when large,
+# expected tissue/stage effects exist. It uses the fitted dispersion trend;
+# it does not regress the group effects out of the transformed matrix.
+vsd <- vst(dds, blind = FALSE)
+vst_matrix <- assay(vsd)
+
+# Select the 500 genes with greatest variance across samples.
+gene_variance <- rowVars(vst_matrix)
+names(gene_variance) <- rownames(vst_matrix)
+
+n_top <- min(500, nrow(vst_matrix))
+top500 <- names(sort(gene_variance, decreasing = TRUE))[seq_len(n_top)]
+
+write.csv(
+  data.frame(
+    gene_id = top500,
+    gene_name = mcols(dds)[top500, "gene_name"],
+    VST_variance = gene_variance[top500]
+  ),
+  "DESeq2_results/QC/top500_variable_genes.csv",
+  row.names = FALSE
+)
+```
+
+
+```{r}
+# ----------------------------
+# 5. PCA: top 500 variable genes
+# ----------------------------
+
+pca <- prcomp(t(vst_matrix[top500, , drop = FALSE]), scale. = FALSE)
+
+percent_var <- 100 * pca$sdev^2 / sum(pca$sdev^2)
+
+pca_data <- cbind(
+  as.data.frame(pca$x[, 1:2, drop = FALSE]),
+  as.data.frame(colData(vsd))
+)
+
+pca_plot <- ggplot(
+  pca_data,
+  aes(
+    x = PC1,
+    y = PC2,
+    color = group,
+    shape = tissue,
+    label = sample_core
+  )
+) +
+  geom_point(size = 3.5) +
+  geom_text_repel(
+    size = 3,
+    max.overlaps = Inf,
+    show.legend = FALSE
+  ) +
+  labs(
+    title = "PCA of all samples",
+    subtitle = paste0(
+      "VST-transformed counts; ",
+      n_top,
+      " most variable genes"
+    ),
+    x = sprintf("PC1 (%.1f%%)", percent_var[1]),
+    y = sprintf("PC2 (%.1f%%)", percent_var[2]),
+    color = "Experimental group",
+    shape = "Tissue"
+  ) +
+  coord_fixed() +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "right")
+
+ggsave(
+  "DESeq2_results/QC/PCA_top500_variable_genes.pdf",
+  pca_plot,
+  width = 10,
+  height = 7
+)
+
+ggsave(
+  "DESeq2_results/QC/PCA_top500_variable_genes.png",
+  pca_plot,
+  width = 10,
+  height = 7,
+  dpi = 300
+)
+
+write.csv(
+  pca_data,
+  "DESeq2_results/QC/PCA_sample_coordinates.csv",
+  row.names = FALSE
+)
+```
+
+
+```{r}
+# ----------------------------
+# 6. Sample-clustering dendrogram
+# ----------------------------
+
+# Euclidean distance across the same top 500 VST genes.
+sample_dist <- dist(t(vst_matrix[top500, , drop = FALSE]))
+sample_hc <- hclust(sample_dist, method = "complete")
+
+sample_labels <- paste(
+  coldata[sample_hc$labels, "sample_core"],
+  coldata[sample_hc$labels, "group"],
+  sep = " | "
+)
+
+pdf(
+  "DESeq2_results/QC/sample_dendrogram_top500.pdf",
+  width = 13,
+  height = 7
+)
+
+plot(
+  sample_hc,
+  labels = sample_labels,
+  main = "Hierarchical clustering of samples",
+  sub = paste(n_top, "most variable VST-transformed genes"),
+  xlab = "",
+  ylab = "Euclidean distance",
+  cex = 0.7,
+  hang = -1
+)
+
+dev.off()
+
+# Sample-to-sample distance heatmap.
+sample_dist_matrix <- as.matrix(sample_dist)
+
+annotation_col <- as.data.frame(
+  colData(vsd)[, c("stage", "treatment", "tissue", "group")]
+)
+
+pheatmap(
+  sample_dist_matrix,
+  annotation_col = annotation_col,
+  annotation_row = annotation_col,
+  clustering_distance_rows = sample_dist,
+  clustering_distance_cols = sample_dist,
+  filename = "DESeq2_results/QC/sample_distance_heatmap.pdf",
+  width = 11,
+  height = 10,
+  main = "Sample distances: top 500 variable genes"
+)
+```
+
+
+```{r}
+# ----------------------------
+# 7. Gene-expression heatmap
+# ----------------------------
+
+# For a readable gene-level heatmap, use the top 50 rather than all genes.
+top50 <- top500[seq_len(min(50, length(top500)))]
+
+heatmap_matrix <- vst_matrix[top50, , drop = FALSE]
+
+# Row-wise z-scores show relative expression patterns per gene.
+heatmap_z <- t(scale(t(heatmap_matrix)))
+heatmap_z[!is.finite(heatmap_z)] <- 0
+
+gene_labels <- mcols(dds)[top50, "gene_name"]
+gene_labels <- ifelse(
+  is.na(gene_labels) | gene_labels == "",
+  top50,
+  paste0(gene_labels, " [", top50, "]")
+)
+
+rownames(heatmap_z) <- make.unique(gene_labels)
+
+pheatmap(
+  heatmap_z,
+  annotation_col = annotation_col,
+  show_colnames = TRUE,
+  show_rownames = TRUE,
+  fontsize_row = 6,
+  fontsize_col = 7,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  clustering_method = "complete",
+  color = colorRampPalette(c("navy", "white", "firebrick3"))(101),
+  breaks = seq(-3, 3, length.out = 102),
+  filename = "DESeq2_results/QC/top50_variable_gene_heatmap.pdf",
+  width = 12,
+  height = 12,
+  main = "Top 50 variable genes (row z-scores)"
+)
+```
+
+
+```{r}
+# ----------------------------
+# 8. DGE and volcano function
+# ----------------------------
+
+run_comparison <- function(
+  dds,
+  numerator,
+  denominator,
+  comparison_name,
+  padj_cutoff = 0.05,
+  lfc_cutoff = 1
+) {
+  contrast_vector <- c("group", numerator, denominator)
+
+  # Statistical results use the DESeq2 Wald test.
+  res <- results(
+    dds,
+    contrast = contrast_vector,
+    alpha = padj_cutoff
+  )
+
+  # Shrink LFCs for ranking and visualization.
+  # ashr preserves large effects and accepts arbitrary contrasts.
+  # If unavailable, DESeq2's built-in normal shrinker is used.
+  if (requireNamespace("ashr", quietly = TRUE)) {
+    res_shrunk <- lfcShrink(
+      dds,
+      contrast = contrast_vector,
+      res = res,
+      type = "ashr"
+    )
+    shrink_method <- "ashr"
+  } else {
+    warning(
+      "Package 'ashr' is unavailable; using DESeq2 type='normal'. ",
+      "Install ashr for the preferred wide-tailed shrinkage estimator."
+    )
+    res_shrunk <- lfcShrink(
+      dds,
+      contrast = contrast_vector,
+      res = res,
+      type = "normal"
+    )
+    shrink_method <- "normal"
+  }
+
+  out <- as.data.frame(res)
+  out$gene_id <- rownames(out)
+  out$gene_name <- mcols(dds)[out$gene_id, "gene_name"]
+  out$product_description <- mcols(dds)[
+    out$gene_id,
+    "product_description"
+  ]
+  out$shrunken_log2FoldChange <- res_shrunk$log2FoldChange
+  out$shrunken_lfcSE <- res_shrunk$lfcSE
+
+  # Put identifiers first.
+  out <- out[, c(
+    "gene_id",
+    "gene_name",
+    "product_description",
+    "baseMean",
+    "log2FoldChange",
+    "lfcSE",
+    "shrunken_log2FoldChange",
+    "shrunken_lfcSE",
+    "stat",
+    "pvalue",
+    "padj"
+  )]
+
+  out <- out[order(out$padj, out$pvalue, na.last = TRUE), ]
+
+  out$significance <- "Not significant"
+  out$significance[
+    !is.na(out$padj) &
+      out$padj < padj_cutoff &
+      out$shrunken_log2FoldChange >= lfc_cutoff
+  ] <- "Up"
+
+  out$significance[
+    !is.na(out$padj) &
+      out$padj < padj_cutoff &
+      out$shrunken_log2FoldChange <= -lfc_cutoff
+  ] <- "Down"
+
+  write.csv(
+    out,
+    file.path(
+      "DESeq2_results/DGE",
+      paste0(comparison_name, "_DESeq2_results.csv")
+    ),
+    row.names = FALSE
+  )
+
+  # For plotting only, NA adjusted p-values are treated as nonsignificant.
+  # DESeq2 may produce NA padj for low-information genes or outliers.
+  plot_data <- out
+  plot_data$plot_padj <- ifelse(
+    is.na(plot_data$padj),
+    1,
+    pmax(plot_data$padj, .Machine$double.xmin)
+  )
+
+  # Label the 10 most significant genes meeting both thresholds.
+  label_candidates <- subset(
+    plot_data,
+    significance != "Not significant" &
+      !is.na(gene_name) &
+      gene_name != ""
+  )
+
+  label_candidates <- head(
+    label_candidates[order(label_candidates$padj), ],
+    10
+  )
+
+  volcano <- ggplot(
+    plot_data,
+    aes(
+      x = shrunken_log2FoldChange,
+      y = -log10(plot_padj),
+      color = significance
+    )
+  ) +
+    geom_point(alpha = 0.65, size = 1.5) +
+    geom_vline(
+      xintercept = c(-lfc_cutoff, lfc_cutoff),
+      linetype = "dashed",
+      color = "grey40"
+    ) +
+    geom_hline(
+      yintercept = -log10(padj_cutoff),
+      linetype = "dashed",
+      color = "grey40"
+    ) +
+    geom_text_repel(
+      data = label_candidates,
+      aes(label = gene_name),
+      size = 3,
+      box.padding = 0.4,
+      max.overlaps = Inf,
+      show.legend = FALSE
+    ) +
+    scale_color_manual(
+      values = c(
+        "Down" = "#2C7BB6",
+        "Not significant" = "grey75",
+        "Up" = "#D7191C"
+      ),
+      breaks = c("Up", "Down", "Not significant")
+    ) +
+    labs(
+      title = comparison_name,
+      subtitle = paste0(
+        numerator,
+        " vs ",
+        denominator,
+        "; LFC shrinkage: ",
+        shrink_method
+      ),
+      x = "Shrunken log2 fold change",
+      y = expression(-log[10]("adjusted p-value")),
+      color = NULL,
+      caption = paste0(
+        "Significant: adjusted p < ",
+        padj_cutoff,
+        " and |shrunken log2FC| \u2265 ",
+        lfc_cutoff
+      )
+    ) +
+    theme_classic(base_size = 12) +
+    theme(legend.position = "top")
+
+  ggsave(
+    file.path(
+      "DESeq2_results/volcano",
+      paste0(comparison_name, "_volcano.pdf")
+    ),
+    volcano,
+    width = 8,
+    height = 7
+  )
+
+  ggsave(
+    file.path(
+      "DESeq2_results/volcano",
+      paste0(comparison_name, "_volcano.png")
+    ),
+    volcano,
+    width = 8,
+    height = 7,
+    dpi = 300
+  )
+
+  message(
+    comparison_name,
+    ": ",
+    sum(out$significance == "Up", na.rm = TRUE),
+    " up and ",
+    sum(out$significance == "Down", na.rm = TRUE),
+    " down"
+  )
+
+  return(out)
+}
+```
+
+
+```{r}
+# ----------------------------
+# 9. Requested comparisons
+# ----------------------------
+
+# Positive LFC = higher expression in OLD control body.
+leg_emergence <- run_comparison(
+  dds = dds,
+  numerator = "Old_Control_Body",
+  denominator = "Young_Control_Body",
+  comparison_name = "leg_emergence_OldControlBody_vs_YoungControlBody"
+)
+
+# Positive LFC = higher expression in OLD control head.
+nervous_system_development <- run_comparison(
+  dds = dds,
+  numerator = "Old_Control_Head",
+  denominator = "Young_Control_Head",
+  comparison_name = "nervous_system_OldControlHead_vs_YoungControlHead"
+)
+
+# Positive LFC = higher expression after FLUTAMIDE treatment.
+ar_blockade_body <- run_comparison(
+  dds = dds,
+  numerator = "Old_Flutamide_Body",
+  denominator = "Old_Control_Body",
+  comparison_name = "AR_blockade_OldBodyFlutamide_vs_OldBodyControl"
+)
+
+# Save the fitted object so analysis need not be rerun.
+saveRDS(dds, "DESeq2_results/dds_fitted.rds")
+saveRDS(vsd, "DESeq2_results/vsd.rds")
+
+sessionInfo()
+```
