@@ -773,20 +773,21 @@ res_interaction <- results(
   alpha = 0.05
 )
 
-# apeglm can shrink this interaction because it is represented by a single
-# model coefficient. Fall back to the unshrunken estimate if unavailable.
-if (requireNamespace("apeglm", quietly = TRUE)) {
+# Use the same ashr shrinkage estimator as the other DGE comparisons so
+# effect-size estimates and volcano plots are methodologically consistent.
+if (requireNamespace("ashr", quietly = TRUE)) {
   res_interaction_shrunk <- lfcShrink(
     dds_old,
     coef = interaction_name,
-    type = "apeglm"
+    res = res_interaction,
+    type = "ashr"
   )
-  interaction_shrink_method <- "apeglm"
+  interaction_shrink_method <- "ashr"
 } else {
   warning(
-    "Package 'apeglm' is unavailable; the interaction CSV and plot will ",
+    "Package 'ashr' is unavailable; the interaction CSV and plot will ",
     "use unshrunken log2 fold changes. Install it with ",
-    "BiocManager::install('apeglm')."
+    "BiocManager::install('ashr')."
   )
   res_interaction_shrunk <- res_interaction
   interaction_shrink_method <- "none"
