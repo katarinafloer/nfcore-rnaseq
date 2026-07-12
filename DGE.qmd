@@ -963,10 +963,304 @@ ggsave(
   dpi = 300
 )
 
+```
+
+
+```{r}
+# ----------------------------
+# 11. Unpaired interaction sensitivity analysis
+# ----------------------------
+
+# This model uses all older head and body libraries but treats them as
+# independent samples. It is included as a sensitivity analysis; the paired
+# tadpole-adjusted interaction above remains the primary analysis.
+
+dds_old_unpaired <- dds[, dds$stage == "Old"]
+dds_old_unpaired$treatment <- droplevels(dds_old_unpaired$treatment)
+dds_old_unpaired$tissue <- droplevels(dds_old_unpaired$tissue)
+
+design(dds_old_unpaired) <- ~ treatment * tissue
+
+unpaired_model_matrix <- model.matrix(
+  design(dds_old_unpaired),
+  data = as.data.frame(colData(dds_old_unpaired))
+)
+
+if (qr(unpaired_model_matrix)$rank != ncol(unpaired_model_matrix)) {
+  stop("The older-only unpaired interaction model is not full rank.")
+}
+
+dds_old_unpaired <- DESeq(dds_old_unpaired)
+
+unpaired_interaction_name <- grep(
+  "treatment.*tissue|tissue.*treatment",
+  resultsNames(dds_old_unpaired),
+  value = TRUE
+)
+
+stopifnot(length(unpaired_interaction_name) == 1)
+
+res_interaction_unpaired <- results(
+  dds_old_unpaired,
+  name = unpaired_interaction_name,
+  alpha = 0.05
+)
+
+if (requireNamespace("ashr", quietly = TRUE)) {
+  res_interaction_unpaired_shrunk <- lfcShrink(
+    dds_old_unpaired,
+    coef = unpaired_interaction_name,
+    res = res_interaction_unpaired,
+    type = "ashr"
+  )
+} else {
+  warning(
+    "Package 'ashr' is unavailable; the unpaired sensitivity analysis ",
+    "will use unshrunken log2 fold changes."
+  )
+  res_interaction_unpaired_shrunk <- res_interaction_unpaired
+}
+
+# Construct a gene-level comparison in the same orientation for both models:
+# (Flutamide head - Control head) -
+# (Flutamide body - Control body).
+sensitivity_comparison <- data.frame(
+  gene_id = rownames(res_interaction),
+  gene_name = mcols(dds_old)[rownames(res_interaction), "gene_name"],
+  product_description = mcols(dds_old)[
+    rownames(res_interaction),
+    "product_description"
+  ],
+  paired_interaction_log2FC = res_interaction_shrunk$log2FoldChange,
+  paired_interaction_padj = res_interaction$padj,
+  unpaired_interaction_log2FC =
+    res_interaction_unpaired_shrunk$log2FoldChange[
+      match(
+        rownames(res_interaction),
+        rownames(res_interaction_unpaired_shrunk)
+      )
+    ],
+  unpaired_interaction_padj = res_interaction_unpaired$padj[
+    match(
+      rownames(res_interaction),
+      rownames(res_interaction_unpaired)
+    )
+  ],
+  stringsAsFactors = FALSE
+)
+
+sensitivity_comparison$direction_agrees <- with(
+  sensitivity_comparison,
+  ifelse(
+    is.na(paired_interaction_log2FC) |
+      is.na(unpaired_interaction_log2FC),
+    NA,
+    sign(paired_interaction_log2FC) ==
+      sign(unpaired_interaction_log2FC)
+  )
+)
+
+sensitivity_comparison$paired_significant <- with(
+  sensitivity_comparison,
+  !is.na(paired_interaction_padj) & paired_interaction_padj < 0.05
+)
+
+sensitivity_comparison$unpaired_significant <- with(
+  sensitivity_comparison,
+  !is.na(unpaired_interaction_padj) & unpaired_interaction_padj < 0.05
+)
+
+sensitivity_comparison$significance_agreement <- with(
+  sensitivity_comparison,
+  paired_significant == unpaired_significant
+)
+
+# Order the detailed table by the primary paired-model adjusted p-value.
+sensitivity_comparison <- sensitivity_comparison[
+  order(
+    sensitivity_comparison$paired_interaction_padj,
+    sensitivity_comparison$unpaired_interaction_padj,
+    na.last = TRUE
+  ),
+]
+
+write.csv(
+  sensitivity_comparison,
+  paste0(
+    "DESeq2_results/DGE/",
+    "AR_blockade_interaction_paired_vs_unpaired_all_genes.csv"
+  ),
+  row.names = FALSE
+)
+
+# Quantify agreement in effect sizes, directions, significant genes, and
+# leading genes. Leading genes are the 20 smallest adjusted p-values in each
+# model, regardless of whether they cross the 0.05 threshold.
+finite_effects <- with(
+  sensitivity_comparison,
+  is.finite(paired_interaction_log2FC) &
+    is.finite(unpaired_interaction_log2FC)
+)
+
+effect_spearman <- cor(
+  sensitivity_comparison$paired_interaction_log2FC[finite_effects],
+  sensitivity_comparison$unpaired_interaction_log2FC[finite_effects],
+  method = "spearman"
+)
+
+overall_direction_agreement <- mean(
+  sensitivity_comparison$direction_agrees[finite_effects],
+  na.rm = TRUE
+)
+
+paired_sig_ids <- sensitivity_comparison$gene_id[
+  sensitivity_comparison$paired_significant
+]
+unpaired_sig_ids <- sensitivity_comparison$gene_id[
+  sensitivity_comparison$unpaired_significant
+]
+
+paired_sig_direction_agreement <- if (length(paired_sig_ids) > 0) {
+  mean(
+    sensitivity_comparison$direction_agrees[
+      sensitivity_comparison$paired_significant
+    ],
+    na.rm = TRUE
+  )
+} else {
+  NA_real_
+}
+
+top_n <- min(20, nrow(sensitivity_comparison))
+
+paired_top_ids <- head(
+  sensitivity_comparison$gene_id[
+    order(sensitivity_comparison$paired_interaction_padj, na.last = TRUE)
+  ],
+  top_n
+)
+
+unpaired_top_ids <- head(
+  sensitivity_comparison$gene_id[
+    order(sensitivity_comparison$unpaired_interaction_padj, na.last = TRUE)
+  ],
+  top_n
+)
+
+shared_significant_ids <- intersect(paired_sig_ids, unpaired_sig_ids)
+shared_top_ids <- intersect(paired_top_ids, unpaired_top_ids)
+
+sensitivity_summary <- data.frame(
+  metric = c(
+    "Genes compared",
+    "Spearman correlation of shrunken interaction log2FC",
+    "Overall effect-direction agreement",
+    "Significant genes in paired model (padj < 0.05)",
+    "Significant genes in unpaired model (padj < 0.05)",
+    "Significant genes shared by both models",
+    "Direction agreement among paired-significant genes",
+    paste0("Shared genes among each model's top ", top_n)
+  ),
+  value = c(
+    sum(finite_effects),
+    effect_spearman,
+    overall_direction_agreement,
+    length(paired_sig_ids),
+    length(unpaired_sig_ids),
+    length(shared_significant_ids),
+    paired_sig_direction_agreement,
+    length(shared_top_ids)
+  ),
+  stringsAsFactors = FALSE
+)
+
+write.csv(
+  sensitivity_summary,
+  paste0(
+    "DESeq2_results/DGE/",
+    "AR_blockade_interaction_paired_vs_unpaired_summary.csv"
+  ),
+  row.names = FALSE
+)
+
+message(
+  "Paired vs unpaired interaction sensitivity analysis: Spearman rho = ",
+  round(effect_spearman, 3),
+  "; direction agreement = ",
+  round(100 * overall_direction_agreement, 1),
+  "%; significant genes paired/unpaired/shared = ",
+  length(paired_sig_ids),
+  "/",
+  length(unpaired_sig_ids),
+  "/",
+  length(shared_significant_ids),
+  "; shared top-",
+  top_n,
+  " genes = ",
+  length(shared_top_ids),
+  "."
+)
+
+print(sensitivity_summary)
+
+# Effect-size agreement plot. Genes significant in the primary paired model
+# are highlighted; the diagonal represents identical interaction estimates.
+sensitivity_scatter <- ggplot(
+  sensitivity_comparison,
+  aes(
+    x = paired_interaction_log2FC,
+    y = unpaired_interaction_log2FC,
+    color = paired_significant
+  )
+) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_hline(yintercept = 0, color = "grey80") +
+  geom_vline(xintercept = 0, color = "grey80") +
+  geom_point(alpha = 0.65, size = 1.5) +
+  scale_color_manual(
+    values = c("FALSE" = "grey70", "TRUE" = "#D7191C"),
+    labels = c("FALSE" = "No", "TRUE" = "Yes")
+  ) +
+  labs(
+    title = "Older tadpoles: paired vs unpaired interaction effects",
+    subtitle = paste0(
+      "Spearman rho = ",
+      round(effect_spearman, 2),
+      "; direction agreement = ",
+      round(100 * overall_direction_agreement, 1),
+      "%"
+    ),
+    x = "Paired interaction shrunken log2FC",
+    y = "Unpaired interaction shrunken log2FC",
+    color = "Paired padj < 0.05"
+  ) +
+  coord_equal() +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "top")
+
+ggsave(
+  "DESeq2_results/QC/AR_blockade_interaction_paired_vs_unpaired.pdf",
+  sensitivity_scatter,
+  width = 8,
+  height = 7
+)
+
+ggsave(
+  "DESeq2_results/QC/AR_blockade_interaction_paired_vs_unpaired.png",
+  sensitivity_scatter,
+  width = 8,
+  height = 7,
+  dpi = 300
+)
+
 # Save the fitted object so analysis need not be rerun.
 saveRDS(dds, "DESeq2_results/dds_fitted.rds")
 saveRDS(vsd, "DESeq2_results/vsd.rds")
 saveRDS(dds_old, "DESeq2_results/dds_old_interaction_fitted.rds")
+saveRDS(
+  dds_old_unpaired,
+  "DESeq2_results/dds_old_unpaired_interaction_fitted.rds"
+)
 
 sessionInfo()
 ```
