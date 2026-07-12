@@ -696,6 +696,14 @@ ar_blockade_body <- run_comparison(
   comparison_name = "AR_blockade_OldBodyFlutamide_vs_OldBodyControl"
 )
 
+# Positive LFC = higher expression after FLUTAMIDE treatment in head tissue.
+ar_blockade_head <- run_comparison(
+  dds = dds,
+  numerator = "Old_Flutamide_Head",
+  denominator = "Old_Control_Head",
+  comparison_name = "AR_blockade_OldHeadFlutamide_vs_OldHeadControl"
+)
+
 # Save the fitted object so analysis need not be rerun.
 saveRDS(dds, "DESeq2_results/dds_fitted.rds")
 saveRDS(vsd, "DESeq2_results/vsd.rds")
