@@ -786,6 +786,222 @@ loo_summary <- aggregate(
 loo_summary
 ```
 
+## Targeted spinal cord motor-neuron and interneuron marker audit
+
+This section checks the candidate list supplied by the PI. Antibody/common
+names are resolved to the gene symbols used in the *S. parvus* annotation.
+Grouped markers are expanded to individual paralogs. “Gone4” is interpreted
+as **GON4L**; Hb9 as **MNX1**; Chx10 as **VSX2**; HuC/HuD as
+**ELAVL3/ELAVL4**; and Raldh2 as **ALDH1A2**.
+
+```{r}
+#| label: candidate-gene-map
+candidate_map <- data.frame(
+  PI_marker = c(
+    "Hb9", "Lhx3 (Lim3)", "Isl1/2", "Isl1/2", "foxp1", "En1",
+    "Evx1", "dmrt3", "nkx2.2", "Chx10", "Shox2", "Hu C/D", "Hu C/D",
+    "Sox2", "Gone4", "Lmx1-2", "Lmx1-2", "MafA", "Otp", "foxp2",
+    "Sox1/3", "Sox1/3", "Sp8", "Lhx2-9 (BamhII)",
+    "Lhx2-9 (BamhII)", "Raldh2", "ChAT"
+  ),
+  resolved_symbol = c(
+    "MNX1", "LHX3", "ISL1", "ISL2", "FOXP1", "EN1", "EVX1", "DMRT3",
+    "NKX2-2", "VSX2", "SHOX2", "ELAVL3", "ELAVL4", "SOX2", "GON4L",
+    "LMX1A", "LMX1B", "MAFA", "OTP", "FOXP2", "SOX1", "SOX3", "SP8",
+    "LHX2", "LHX9", "ALDH1A2", "CHAT"
+  ),
+  alias_note = c(
+    "Hb9 is MNX1", "Lim3 is LHX3", "Isl1", "Isl2", "", "", "", "",
+    "NKX2-2", "Chx10 is VSX2", "", "HuC is ELAVL3", "HuD is ELAVL4",
+    "", "Gone4 interpreted as GON4L", "Lmx1a", "Lmx1b", "", "", "",
+    "Sox1", "Sox3", "", "Lhx2", "Lhx9", "Raldh2 is ALDH1A2", ""
+  ),
+  stringsAsFactors = FALSE
+)
+
+annotation_lookup <- unique(tx2gene_raw[, c("gene_id", "gene")])
+candidate_map$gene_id <- annotation_lookup$gene_id[
+  match(candidate_map$resolved_symbol, annotation_lookup$gene)
+]
+candidate_map$present_in_annotation <- !is.na(candidate_map$gene_id)
+candidate_map$retained_after_filter <-
+  candidate_map$gene_id %in% rownames(dds)
+
+stopifnot(all(candidate_map$present_in_annotation))
+candidate_map
+```
+
+Presence in the annotation does not guarantee sufficient expression for
+differential testing. A gene absent after filtering had fewer than three
+libraries with counts of at least 10 and is reported as “not tested,” not as
+evidence of no expression.
+
+```{r}
+#| label: candidate-gene-results
+candidate_comparisons <- list(
+  stage_body = leg_emergence,
+  stage_head = nervous_system_development,
+  flutamide_tank_body = ar_blockade_body,
+  flutamide_tank_head = ar_blockade_head
+)
+
+candidate_long <- do.call(rbind, lapply(names(candidate_comparisons), function(nm) {
+  obj <- candidate_comparisons[[nm]]
+  tab <- obj$table
+  idx <- match(candidate_map$gene_id, tab$gene_id)
+  data.frame(
+    PI_marker = candidate_map$PI_marker,
+    resolved_symbol = candidate_map$resolved_symbol,
+    gene_id = candidate_map$gene_id,
+    comparison = nm,
+    present_in_annotation = candidate_map$present_in_annotation,
+    retained_after_filter = candidate_map$retained_after_filter,
+    baseMean = tab$baseMean[idx],
+    shrunken_log2FoldChange = tab$shrunken_log2FoldChange[idx],
+    pvalue = tab$pvalue[idx],
+    padj = tab$padj[idx],
+    threshold_padj = tab$threshold_padj[idx],
+    standard_FDR_significant = tab$standard_FDR_significant[idx],
+    LFC_threshold_FDR_significant =
+      tab$LFC_threshold_FDR_significant[idx],
+    stringsAsFactors = FALSE
+  )
+}))
+
+# Add the paired tissue interaction as a fifth comparison. It tests whether
+# the day-103 between-tank association differs between head and body.
+interaction_idx <- match(candidate_map$gene_id, interaction_out$gene_id)
+candidate_interaction <- data.frame(
+  PI_marker = candidate_map$PI_marker,
+  resolved_symbol = candidate_map$resolved_symbol,
+  gene_id = candidate_map$gene_id,
+  comparison = "paired_tissue_interaction",
+  present_in_annotation = candidate_map$present_in_annotation,
+  retained_after_filter = candidate_map$retained_after_filter,
+  baseMean = interaction_out$baseMean[interaction_idx],
+  shrunken_log2FoldChange =
+    interaction_out$shrunken_interaction_log2FC[interaction_idx],
+  pvalue = interaction_out$pvalue[interaction_idx],
+  padj = interaction_out$padj[interaction_idx],
+  threshold_padj = NA_real_,
+  standard_FDR_significant =
+    interaction_out$paired_interaction_FDR_significant[interaction_idx],
+  LFC_threshold_FDR_significant = NA,
+  stringsAsFactors = FALSE
+)
+candidate_long <- rbind(candidate_long, candidate_interaction)
+
+candidate_long$direction <- ifelse(
+  is.na(candidate_long$shrunken_log2FoldChange), NA,
+  ifelse(candidate_long$shrunken_log2FoldChange > 0, "Higher", "Lower")
+)
+candidate_long$DE_call <- ifelse(
+  !candidate_long$retained_after_filter, "Not tested: low counts",
+  ifelse(is.na(candidate_long$padj), "Tested; adjusted p-value unavailable",
+    ifelse(candidate_long$standard_FDR_significant,
+           paste("FDR < 0.05", candidate_long$direction),
+           "Not significant at FDR 0.05"))
+)
+
+write.csv(
+  candidate_long,
+  "DESeq2_results/DGE/spinal_marker_candidates_all_comparisons.csv",
+  row.names = FALSE
+)
+
+candidate_overview <- do.call(rbind, lapply(seq_len(nrow(candidate_map)), function(i) {
+  z <- candidate_long[candidate_long$resolved_symbol ==
+                        candidate_map$resolved_symbol[i], ]
+  data.frame(
+    PI_marker = candidate_map$PI_marker[i],
+    resolved_symbol = candidate_map$resolved_symbol[i],
+    gene_id = candidate_map$gene_id[i],
+    present_in_annotation = candidate_map$present_in_annotation[i],
+    retained_after_filter = candidate_map$retained_after_filter[i],
+    any_standard_FDR_hit = any(z$standard_FDR_significant, na.rm = TRUE),
+    significant_comparisons = paste(
+      z$comparison[which(z$standard_FDR_significant %in% TRUE)],
+      collapse = "; "
+    ),
+    any_formal_abs_LFC_above_1_hit =
+      any(z$LFC_threshold_FDR_significant, na.rm = TRUE),
+    stringsAsFactors = FALSE
+  )
+}))
+write.csv(
+  candidate_overview,
+  "DESeq2_results/DGE/spinal_marker_candidates_presence_summary.csv",
+  row.names = FALSE
+)
+candidate_overview
+```
+
+The standard FDR column answers whether a candidate differs from zero under
+any comparison. The formal effect-threshold column is more stringent and asks
+whether an absolute LFC greater than 1 is statistically supported. The paired
+interaction is evaluated only against zero, because the interaction analysis
+was not specified as an effect-threshold test.
+
+```{r}
+#| label: candidate-gene-expression
+candidate_ids <- candidate_map$gene_id[candidate_map$retained_after_filter]
+candidate_symbols <- candidate_map$resolved_symbol[
+  candidate_map$retained_after_filter
+]
+normalized_candidate_counts <- counts(dds, normalized = TRUE)[
+  candidate_ids, , drop = FALSE
+]
+
+candidate_expression_long <- do.call(rbind, lapply(seq_along(candidate_ids), function(i) {
+  data.frame(
+    gene_id = candidate_ids[i],
+    resolved_symbol = candidate_symbols[i],
+    sample_id = colnames(dds),
+    group = dds$group,
+    normalized_count = normalized_candidate_counts[i, ],
+    stringsAsFactors = FALSE
+  )
+}))
+write.csv(
+  candidate_expression_long,
+  "DESeq2_results/DGE/spinal_marker_candidates_normalized_counts.csv",
+  row.names = FALSE
+)
+
+candidate_expression_plot <- ggplot(
+  candidate_expression_long,
+  aes(x = group, y = log2(normalized_count + 1), color = group)
+) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.15, color = "grey45") +
+  geom_point(position = position_jitter(width = 0.12), size = 0.9,
+             alpha = 0.75) +
+  facet_wrap(~ resolved_symbol, scales = "free_y", ncol = 4) +
+  labs(
+    title = "Targeted spinal cord marker expression across bulk tissue groups",
+    subtitle = "DESeq2-normalized gene counts; points are libraries",
+    x = NULL,
+    y = "log2(normalized count + 1)",
+    color = "Group"
+  ) +
+  theme_classic(base_size = 9) +
+  theme(
+    axis.text.x = element_text(angle = 60, hjust = 1, size = 6),
+    legend.position = "none"
+  )
+ggsave(
+  "DESeq2_results/QC/spinal_marker_candidates_normalized_counts.pdf",
+  candidate_expression_plot,
+  width = 15,
+  height = 17
+)
+candidate_expression_plot
+```
+
+These measurements come from bulk head and body dissections. A marker can be
+strongly localized by immunohistochemistry yet show no bulk-tissue DE if its
+cell population is rare, if opposing cell populations dilute the signal, or
+if expression changes spatially without changing the tissue-wide mean.
+
 ## Interpretation
 
 A positive interaction means the flutamide-tank association is more positive in head than body; it may arise from stronger head induction, stronger body repression, or both. A negative interaction has the opposite meaning. Interaction sign is not ordinary gene up- or downregulation.
