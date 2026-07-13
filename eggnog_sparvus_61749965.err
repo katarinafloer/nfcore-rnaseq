@@ -1,0 +1,6 @@
+Removing uri version main
+Loading uri version main
+NOTE: The modules under this branch will not run on the login node. Use
+--constraint=avx512 for sbatch or srun sessions. 
+[1;32mFunctional annotation of hits...[0m
+500 233.58604431152344 2.14 q/s (% mem usage: 4.40, % mem avail: 95.60)

@@ -1,0 +1,7 @@
+Job started: Mon Jul 13 12:31:28 AM UTC 2026
+Node: cpu026
+CPUs: 16
+Proteins: 38498
+#  emapper-2.1.12
+# emapper.py  -i complete.proteins.faa --itype proteins --output sparvus_egapx --output_dir eggnog_annotation --cpu 16 --override
+[1;33m  /modules/uri_apps/software/DIAMOND/2.1.8-GCC-12.3.0/bin/diamond blastp -d '/modules/uri_apps/software/eggnog-mapper/2.1.12-foss-2023a/lib/python3.11/site-packages/data/eggnog_proteins.dmnd' -q '/scratch3/workspace/kfloer_smith_edu-simple/egapx_sparvus/output_tadpole_plus_adult/complete.proteins.faa' --threads 16 -o '/scratch3/workspace/kfloer_smith_edu-simple/egapx_sparvus/output_tadpole_plus_adult/eggnog_annotation/sparvus_egapx.emapper.hits' --tmpdir '/scratch3/workspace/kfloer_smith_edu-simple/egapx_sparvus/output_tadpole_plus_adult/emappertmp_dmdn_ugirdypo' --sensitive --iterate -e 0.001 --top 3  --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qcovhsp scovhsp[0m
